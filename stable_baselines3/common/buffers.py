@@ -739,3 +739,62 @@ class DictRolloutBuffer(RolloutBuffer):
             advantages=self.to_torch(self.advantages[batch_inds].flatten()),
             returns=self.to_torch(self.returns[batch_inds].flatten()),
         )
+
+class nStepReplayBuffer(ReplayBuffer):
+    def __init__(
+        self,
+        buffer_size: int,
+        observation_space: spaces.Space,
+        action_space: spaces.Space,
+        device: Union[th.device, str] = "cpu",
+        n_envs: int = 1,
+        optimize_memory_usage: bool = False,
+        handle_timeout_termination: bool = True,
+        n_steps: int = 1,
+        gamma: int = 0.99,
+    ):
+        super(nStepReplayBuffer, self).__init__(buffer_size, observation_space, action_space, device, n_envs=n_envs,optimize_memory_usage=optimize_memory_usage,handle_timeout_termination=handle_timeout_termination)
+        self.n_steps = n_steps
+        self.gamma = gamma
+        self.n_step_scaling = np.array([self.gamma**i for i in range(self.n_steps)], dtype="float32")
+
+    def _get_samples(self, batch_inds: np.ndarray, env: Optional[VecNormalize] = None) -> ReplayBufferSamples:
+        
+        if self.optimize_memory_usage:
+            next_obs = self._normalize_obs(self.observations[(batch_inds + 1 + self.n_steps) % self.buffer_size, 0, :], env)
+        else:
+            next_obs = self._normalize_obs(self.next_observations[(batch_inds + self.n_steps) % self.buffer_size, 0, :], env)
+
+        returns = np.zeros_like(self.rewards[batch_inds])
+        dones_returns = np.zeros_like(self.dones[batch_inds])
+        timeouts_returns = np.zeros_like(self.timeouts[batch_inds])
+        for i,idx in enumerate(batch_inds):
+            if idx + self.n_steps < self.buffer_size:
+                return_idx = self.rewards[idx:idx+self.n_steps].reshape(self.n_steps)
+                dones_idx = self.dones[idx:idx+self.n_steps].reshape(self.n_steps)
+                timeouts_idx = self.timeouts[idx:idx+self.n_steps].reshape(self.n_steps)
+            else:
+                return_idx1 = self.rewards[idx:]
+                return_idx2 = self.rewards[:self.n_steps - (self.buffer_size-idx)]
+                return_idx = np.concatenate((return_idx1,return_idx2),axis=0).reshape(self.n_steps)
+                dones_idx1 = self.dones[idx:]
+                dones_idx2 = self.dones[:self.n_steps - (self.buffer_size-idx)]
+                dones_idx = np.concatenate((dones_idx1,dones_idx2),axis=0).reshape(self.n_steps)
+                timeouts_idx1 = self.timeouts[idx:]
+                timeouts_idx2 = self.timeouts[:self.n_steps - (self.buffer_size-idx)]
+                timeouts_idx = np.concatenate((timeouts_idx1,timeouts_idx2),axis=0).reshape(self.n_steps)
+
+            returns[i] = return_idx @ self.n_step_scaling
+            dones_returns[i] = 1 if np.sum(dones_idx) > 0 else 0
+            timeouts_returns[i] = 1 if np.sum(timeouts_idx) > 0 else 0
+
+        data = (
+            self._normalize_obs(self.observations[batch_inds, 0, :], env),
+            self.actions[batch_inds, 0, :],
+            next_obs,
+            # Only use dones that are not due to timeouts
+            # deactivated by default (timeouts is initialized as an array of False)
+            dones_returns * (1 - timeouts_returns),
+            self._normalize_reward(returns, env),
+        )
+        return ReplayBufferSamples(*tuple(map(self.to_torch, data)))

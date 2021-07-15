@@ -36,6 +36,7 @@ class QNetwork(BasePolicy):
         net_arch: Optional[List[int]] = None,
         activation_fn: Type[nn.Module] = nn.ReLU,
         normalize_images: bool = True,
+        auxilary_next_state_coeff: float = 0.0,
     ):
         super(QNetwork, self).__init__(
             observation_space,
@@ -53,7 +54,11 @@ class QNetwork(BasePolicy):
         self.features_dim = features_dim
         self.normalize_images = normalize_images
         action_dim = self.action_space.n  # number of actions
-        q_net = create_mlp(self.features_dim, action_dim, self.net_arch, self.activation_fn)
+        self.auxilary_next_state_coeff = auxilary_next_state_coeff
+        output_dim = action_dim
+        if self.auxilary_next_state_coeff > 0:
+            output_dim += self.features_dim
+        q_net = create_mlp(self.features_dim, output_dim, self.net_arch, self.activation_fn)
         self.q_net = nn.Sequential(*q_net)
 
     def forward(self, obs: th.Tensor) -> th.Tensor:
@@ -67,6 +72,7 @@ class QNetwork(BasePolicy):
 
     def _predict(self, observation: th.Tensor, deterministic: bool = True) -> th.Tensor:
         q_values = self.forward(observation)
+        q_values = th.narrow(q_values,1,0,self.action_space.n)
         # Greedy action
         action = q_values.argmax(dim=1).reshape(-1)
         return action
@@ -117,6 +123,7 @@ class DQNPolicy(BasePolicy):
         normalize_images: bool = True,
         optimizer_class: Type[th.optim.Optimizer] = th.optim.Adam,
         optimizer_kwargs: Optional[Dict[str, Any]] = None,
+        auxilary_next_state_coeff: float = 0.0,
     ):
         super(DQNPolicy, self).__init__(
             observation_space,
@@ -145,6 +152,7 @@ class DQNPolicy(BasePolicy):
             "normalize_images": normalize_images,
         }
 
+        self.auxilary_next_state_coeff = auxilary_next_state_coeff
         self.q_net, self.q_net_target = None, None
         self._build(lr_schedule)
 
@@ -166,6 +174,7 @@ class DQNPolicy(BasePolicy):
     def make_q_net(self) -> QNetwork:
         # Make sure we always have separate networks for features extractors etc
         net_args = self._update_features_extractor(self.net_args, features_extractor=None)
+        net_args['auxilary_next_state_coeff'] = self.auxilary_next_state_coeff
         return QNetwork(**net_args).to(self.device)
 
     def forward(self, obs: th.Tensor, deterministic: bool = True) -> th.Tensor:

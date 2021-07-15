@@ -5,7 +5,7 @@ import numpy as np
 import torch as th
 from torch.nn import functional as F
 
-from stable_baselines3.common.buffers import ReplayBuffer
+from stable_baselines3.common.buffers import ReplayBuffer,nStepReplayBuffer
 from stable_baselines3.common.off_policy_algorithm import OffPolicyAlgorithm
 from stable_baselines3.common.preprocessing import maybe_transpose
 from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback, Schedule
@@ -163,21 +163,30 @@ class DQN(OffPolicyAlgorithm):
             with th.no_grad():
                 # Compute the next Q-values using the target network
                 next_q_values = self.q_net_target(replay_data.next_observations)
+                next_q_values = th.narrow(next_q_values,1,0,self.action_space.n)
                 # Follow greedy policy: use the one with the highest value
                 next_q_values, _ = next_q_values.max(dim=1)
                 # Avoid potential broadcast issue
                 next_q_values = next_q_values.reshape(-1, 1)
-                # 1-step TD target
-                target_q_values = replay_data.rewards + (1 - replay_data.dones) * self.gamma * next_q_values
+                # 1-step (or n-step) TD target
+                horizon = 1
+                if self.replay_buffer_class == nStepReplayBuffer:
+                    horizon = self.replay_buffer.n_steps
+                target_q_values = replay_data.rewards + (1 - replay_data.dones) * (self.gamma ** horizon) * next_q_values
 
             # Get current Q-values estimates
             current_q_values = self.q_net(replay_data.observations)
+            if self.policy.auxilary_next_state_coeff > 0:
+                current_next_state_pred = th.narrow(current_q_values,1,self.action_space.n,replay_data.next_observations.shape[1])
+            current_q_values = th.narrow(current_q_values,1,0,self.action_space.n)
 
             # Retrieve the q-values for the actions from the replay buffer
             current_q_values = th.gather(current_q_values, dim=1, index=replay_data.actions.long())
 
             # Compute Huber loss (less sensitive to outliers)
             loss = F.smooth_l1_loss(current_q_values, target_q_values)
+            if self.policy.auxilary_next_state_coeff > 0:
+                loss += self.policy.auxilary_next_state_coeff * F.mse_loss(current_next_state_pred, replay_data.next_observations)
             losses.append(loss.item())
 
             # Optimize the policy

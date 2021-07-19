@@ -177,16 +177,16 @@ class DQN(OffPolicyAlgorithm):
             # Get current Q-values estimates
             current_q_values = self.q_net(replay_data.observations)
             if self.policy.auxilary_next_state_coeff > 0:
-                current_next_state_pred = th.narrow(current_q_values,1,self.action_space.n,replay_data.next_observations.shape[1])
+                flattened_next_observations = replay_data.next_observations.flatten(start_dim=1).type(th.FloatTensor)
+                current_next_state_pred = th.narrow(current_q_values,1,self.action_space.n,flattened_next_observations.shape[1])
             current_q_values = th.narrow(current_q_values,1,0,self.action_space.n)
 
             # Retrieve the q-values for the actions from the replay buffer
             current_q_values = th.gather(current_q_values, dim=1, index=replay_data.actions.long())
-
             # Compute Huber loss (less sensitive to outliers)
             loss = F.smooth_l1_loss(current_q_values, target_q_values)
             if self.policy.auxilary_next_state_coeff > 0:
-                loss += self.policy.auxilary_next_state_coeff * F.mse_loss(current_next_state_pred, replay_data.next_observations)
+                loss += self.policy.auxilary_next_state_coeff * F.mse_loss(current_next_state_pred, flattened_next_observations)
             losses.append(loss.item())
 
             # Optimize the policy
